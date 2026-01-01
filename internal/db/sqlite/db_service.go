@@ -191,18 +191,50 @@ func garbageCollectOldDeletedLocked(ctx context.Context, fdb *folderDB) error {
 	}
 
 	// Remove deleted files that are marked as not needed (we have processed
-	// them) and they were deleted more than MaxDeletedFileAge ago.
+	// them) and they were deleted more than deleteRetention ago. We process
+	// in chunks to avoid large transactions that could cause OOM when there
+	// are many tombstones to delete.
+	cutoff := time.Now().Add(-fdb.deleteRetention).UnixNano()
 	l.DebugContext(ctx, "Forgetting deleted files", "retention", fdb.deleteRetention)
-	res, err := fdb.stmt(`
-		DELETE FROM files
-		WHERE deleted AND modified < ? AND local_flags & {{.FlagLocalNeeded}} == 0
-	`).Exec(time.Now().Add(-fdb.deleteRetention).UnixNano())
-	if err != nil {
-		return wrap(err)
+
+	t0 := time.Now()
+	var totalAffected int64
+	for {
+		if d := time.Since(t0); d > gcMaxRuntime {
+			l.InfoContext(ctx, "Tombstone GC was interrupted due to exceeding time limit", "affected", totalAffected, "runtime", d)
+			break
+		}
+
+		// Delete a chunk of tombstones using a subquery with LIMIT. This
+		// ensures each DELETE is bounded in size, preventing large
+		// transactions that could cause memory issues.
+		res, err := fdb.stmt(`
+			DELETE FROM files
+			WHERE sequence IN (
+				SELECT sequence FROM files
+				WHERE deleted AND modified < ? AND local_flags & {{.FlagLocalNeeded}} == 0
+				LIMIT ?
+			)
+		`).Exec(cutoff, gcChunkSize)
+		if err != nil {
+			return wrap(err)
+		}
+
+		aff, err := res.RowsAffected()
+		if err != nil {
+			return wrap(err)
+		}
+		totalAffected += aff
+
+		if aff == 0 {
+			// No more rows to delete
+			break
+		}
+
+		l.DebugContext(ctx, "Deleted tombstone chunk", "affected", aff, "total", totalAffected, "runtime", time.Since(t0))
 	}
-	if aff, err := res.RowsAffected(); err == nil {
-		l.DebugContext(ctx, "Removed old deleted file records", "affected", aff)
-	}
+
+	l.DebugContext(ctx, "Removed old deleted file records", "affected", totalAffected)
 	return nil
 }
 
