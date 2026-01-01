@@ -65,7 +65,7 @@ func (s *Service) Serve(ctx context.Context) error {
 	if wait < 0 {
 		wait = time.Minute
 	}
-	slog.DebugContext(ctx, "Next periodic run due", "after", wait)
+	slog.InfoContext(ctx, "Next database maintenance scheduled", "after", wait)
 
 	timer := time.NewTimer(wait)
 	for {
@@ -80,17 +80,17 @@ func (s *Service) Serve(ctx context.Context) error {
 		}
 
 		timer.Reset(s.maintenanceInterval)
-		slog.DebugContext(ctx, "Next periodic run due", "after", s.maintenanceInterval)
+		slog.InfoContext(ctx, "Next database maintenance scheduled", "after", s.maintenanceInterval)
 		_ = s.internalMeta.PutTime(lastMaintKey, time.Now())
 	}
 }
 
 func (s *Service) periodic(ctx context.Context) error {
 	t0 := time.Now()
-	slog.DebugContext(ctx, "Periodic start")
-
-	t1 := time.Now()
-	defer func() { slog.DebugContext(ctx, "Periodic done in", "t1", time.Since(t1), "t0t1", t1.Sub(t0)) }()
+	slog.InfoContext(ctx, "Starting database maintenance and garbage collection")
+	defer func() {
+		slog.InfoContext(ctx, "Database maintenance completed", "duration", time.Since(t0))
+	}()
 
 	s.sdb.updateLock.Lock()
 	err := tidy(ctx, s.sdb.sql)
@@ -115,6 +115,8 @@ func (s *Service) periodic(ctx context.Context) error {
 			slog.DebugContext(ctx, "Skipping unnecessary GC", "folder", fdb.folderID, "fdb", fdb.baseName)
 			return nil
 		}
+
+		slog.InfoContext(ctx, "Running garbage collection", "folder", fdb.folderID)
 
 		// Run the GC steps, in a function to be able to use a deferred
 		// unlock.
