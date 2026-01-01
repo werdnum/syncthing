@@ -55,10 +55,11 @@ func newService(sdb *DB, maintenanceInterval time.Duration) *Service {
 }
 
 // RunMaintenanceOnce runs the maintenance/GC operations once and returns.
-// This is intended for standalone/offline maintenance, separate from the
-// periodic maintenance that runs when Syncthing is serving.
+// This is intended for standalone/offline maintenance when Syncthing is not
+// running. Unlike periodic maintenance, this always runs GC regardless of
+// whether sequences have changed.
 func (s *Service) RunMaintenanceOnce(ctx context.Context) error {
-	return s.periodic(ctx)
+	return s.maintenance(ctx, true)
 }
 
 func (s *Service) Serve(ctx context.Context) error {
@@ -93,6 +94,12 @@ func (s *Service) Serve(ctx context.Context) error {
 }
 
 func (s *Service) periodic(ctx context.Context) error {
+	return s.maintenance(ctx, false)
+}
+
+// maintenance runs database maintenance. If force is true, GC is always run
+// regardless of whether sequences have changed since the last run.
+func (s *Service) maintenance(ctx context.Context, force bool) error {
 	t0 := time.Now()
 	slog.DebugContext(ctx, "Periodic start")
 
@@ -114,13 +121,15 @@ func (s *Service) periodic(ctx context.Context) error {
 		}
 		// Get the last successful GC sequence. If it's the same as the
 		// current sequence, nothing has changed and we can skip the GC
-		// entirely.
+		// entirely (unless force is set).
 		meta := db.NewTyped(fdb, internalMetaPrefix)
-		if prev, _, err := meta.Int64(lastSuccessfulGCSeqKey); err != nil {
-			return wrap(err)
-		} else if seq == prev {
-			slog.DebugContext(ctx, "Skipping unnecessary GC", "folder", fdb.folderID, "fdb", fdb.baseName)
-			return nil
+		if !force {
+			if prev, _, err := meta.Int64(lastSuccessfulGCSeqKey); err != nil {
+				return wrap(err)
+			} else if seq == prev {
+				slog.DebugContext(ctx, "Skipping unnecessary GC", "folder", fdb.folderID, "fdb", fdb.baseName)
+				return nil
+			}
 		}
 
 		// Run the GC steps, in a function to be able to use a deferred

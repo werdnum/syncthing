@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/syncthing/syncthing/internal/db"
 	"github.com/syncthing/syncthing/lib/protocol"
 )
 
@@ -577,6 +578,95 @@ func TestRunMaintenanceOnceCancellation(t *testing.T) {
 		// It's acceptable for maintenance to either fail with context.Canceled
 		// or succeed quickly before checking the context
 		t.Logf("maintenance with cancelled context returned: %v", err)
+	}
+}
+
+func TestPeriodicSkipsUnchangedFolders(t *testing.T) {
+	// Test that periodic() skips GC when sequences haven't changed,
+	// but RunMaintenanceOnce() always runs GC
+	t.Parallel()
+
+	const folderID = "test"
+	const deleteRetention = 48 * time.Hour
+
+	sdb, err := Open(t.TempDir(), WithDeleteRetention(deleteRetention))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := sdb.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	svc, ok := sdb.Service(time.Hour).(*Service)
+	if !ok {
+		t.Fatal("failed to get service")
+	}
+
+	// Add a file to create the folder
+	files := []protocol.FileInfo{
+		{
+			Name:      "test-file",
+			ModifiedS: time.Now().Unix(),
+			Version:   protocol.Vector{}.Update(1),
+			Deleted:   false,
+			Size:      100,
+		},
+	}
+	if err := sdb.Update(folderID, protocol.LocalDeviceID, files); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run periodic maintenance - this should run GC and update the sequence
+	if err := svc.periodic(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Get the last successful GC sequence
+	fdb, err := sdb.getFolderDB(folderID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := db.NewTyped(fdb, internalMetaPrefix)
+	seq1, ok1, err := meta.Int64(lastSuccessfulGCSeqKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok1 {
+		t.Fatal("expected lastSuccessfulGCSeq to be set after periodic()")
+	}
+
+	// Run periodic again without any changes - it should skip GC
+	// (we can't directly test "skip" but we can verify the sequence doesn't change
+	// and the function completes quickly without error)
+	if err := svc.periodic(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sequence should be the same (GC was skipped, nothing to update)
+	seq2, _, err := meta.Int64(lastSuccessfulGCSeqKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq1 != seq2 {
+		t.Errorf("expected sequence to remain %d after skipped GC, got %d", seq1, seq2)
+	}
+
+	// Now run RunMaintenanceOnce - this should always run GC even though
+	// nothing has changed
+	if err := svc.RunMaintenanceOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// The sequence should still be the same value (nothing changed in the DB)
+	// but GC was actually executed (we can't easily verify this without mocking,
+	// but we verify the function completes without error)
+	seq3, _, err := meta.Int64(lastSuccessfulGCSeqKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq2 != seq3 {
+		t.Errorf("expected sequence to remain %d, got %d", seq2, seq3)
 	}
 }
 
