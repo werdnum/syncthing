@@ -185,8 +185,9 @@ func garbageCollectNamesAndVersions(ctx context.Context, fdb *folderDB) error {
 
 func garbageCollectOldDeletedLocked(ctx context.Context, fdb *folderDB) error {
 	l := slog.With("folder", fdb.folderID, "fdb", fdb.baseName)
+	l.DebugContext(ctx, "Starting tombstone GC for folder")
 	if fdb.deleteRetention <= 0 {
-		slog.DebugContext(ctx, "Delete retention is infinite, skipping cleanup")
+		l.DebugContext(ctx, "Delete retention is infinite, skipping cleanup")
 		return nil
 	}
 
@@ -199,11 +200,15 @@ func garbageCollectOldDeletedLocked(ctx context.Context, fdb *folderDB) error {
 
 	t0 := time.Now()
 	var totalAffected int64
+	var chunkNum int
 	for {
 		if d := time.Since(t0); d > gcMaxRuntime {
 			l.InfoContext(ctx, "Tombstone GC was interrupted due to exceeding time limit", "affected", totalAffected, "runtime", d)
 			break
 		}
+
+		chunkNum++
+		l.DebugContext(ctx, "Starting tombstone chunk deletion", "chunk", chunkNum, "chunkSize", gcChunkSize)
 
 		// Delete a chunk of tombstones using a subquery with LIMIT. This
 		// ensures each DELETE is bounded in size, preventing large
@@ -231,7 +236,7 @@ func garbageCollectOldDeletedLocked(ctx context.Context, fdb *folderDB) error {
 			break
 		}
 
-		l.DebugContext(ctx, "Deleted tombstone chunk", "affected", aff, "total", totalAffected, "runtime", time.Since(t0))
+		l.DebugContext(ctx, "Finished tombstone chunk deletion", "chunk", chunkNum, "affected", aff, "total", totalAffected, "runtime", time.Since(t0))
 	}
 
 	l.DebugContext(ctx, "Removed old deleted file records", "affected", totalAffected)
