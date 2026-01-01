@@ -941,6 +941,7 @@ type debugCmd struct {
 	DatabaseStatistics databaseStatsCmd  `cmd:"" help:"Display database size statistics"`
 	DatabaseCounts     databaseCountsCmd `cmd:"" help:"Display database folder counts"`
 	DatabaseFile       databaseFileCmd   `cmd:"" help:"Display database file metadata"`
+	Maintenance        maintenanceCmd    `cmd:"" help:"Run database maintenance/garbage collection offline"`
 }
 
 type resetDatabaseCmd struct{}
@@ -1000,6 +1001,58 @@ func (c databaseFileCmd) Run() error {
 	}
 
 	return db.DebugFilePattern(os.Stdout, c.Folder, c.File)
+}
+
+type maintenanceCmd struct {
+	DeleteRetention time.Duration `help:"Deleted item retention interval" default:"10920h"`
+}
+
+func (c maintenanceCmd) Run() error {
+	dbPath := locations.Get(locations.Database)
+
+	// Try to acquire the lock file to ensure Syncthing is not running.
+	// We don't want to run maintenance while Syncthing is active as it
+	// could interfere with ongoing operations.
+	lockPath := locations.Get(locations.LockFile)
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		slog.Error("Failed to create lock directory", slogutil.Error(err))
+		return fmt.Errorf("failed to create lock directory: %w", err)
+	}
+	lf := flock.New(lockPath)
+	locked, err := lf.TryLock()
+	if err != nil {
+		slog.Error("Failed to acquire lock", slogutil.Error(err))
+		return fmt.Errorf("failed to acquire lock: %w", err)
+	}
+	if !locked {
+		slog.Error("Failed to acquire lock: is Syncthing running? Stop it first or use periodic maintenance.")
+		return errors.New("failed to acquire lock: syncthing may be running")
+	}
+	defer func() { _ = lf.Unlock() }()
+
+	slog.Info("Opening database for maintenance", slogutil.FilePath(dbPath))
+
+	db, err := sqlite.Open(dbPath, sqlite.WithDeleteRetention(c.DeleteRetention))
+	if err != nil {
+		slog.Error("Error opening database", slogutil.Error(err))
+		return fmt.Errorf("error opening database: %w", err)
+	}
+	defer db.Close()
+
+	slog.Info("Running database maintenance", slog.Duration("deleteRetention", c.DeleteRetention))
+
+	svc, ok := db.Service(time.Hour).(*sqlite.Service)
+	if !ok {
+		slog.Error("Failed to get maintenance service")
+		return errors.New("failed to get maintenance service")
+	}
+	if err := svc.RunMaintenanceOnce(context.Background()); err != nil {
+		slog.Error("Maintenance failed", slogutil.Error(err))
+		return fmt.Errorf("maintenance failed: %w", err)
+	}
+
+	slog.Info("Database maintenance completed successfully")
+	return nil
 }
 
 func (c databaseStatsCmd) printStat(w io.Writer, s *sqlite.DatabaseStatistics) {

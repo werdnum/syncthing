@@ -54,6 +54,13 @@ func newService(sdb *DB, maintenanceInterval time.Duration) *Service {
 	}
 }
 
+// RunMaintenanceOnce runs the maintenance/GC operations once and returns.
+// This is intended for standalone/offline maintenance, separate from the
+// periodic maintenance that runs when Syncthing is serving.
+func (s *Service) RunMaintenanceOnce(ctx context.Context) error {
+	return s.periodic(ctx)
+}
+
 func (s *Service) Serve(ctx context.Context) error {
 	// Run periodic maintenance
 
