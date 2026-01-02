@@ -138,13 +138,13 @@ func (s *Service) maintenance(ctx context.Context, force bool) error {
 			fdb.updateLock.Lock()
 			defer fdb.updateLock.Unlock()
 
-			if err := garbageCollectOldDeletedLocked(ctx, fdb); err != nil {
+			if err := garbageCollectOldDeletedLocked(ctx, fdb, force); err != nil {
 				return wrap(err)
 			}
 			if err := garbageCollectNamesAndVersions(ctx, fdb); err != nil {
 				return wrap(err)
 			}
-			if err := garbageCollectBlocklistsAndBlocksLocked(ctx, fdb); err != nil {
+			if err := garbageCollectBlocklistsAndBlocksLocked(ctx, fdb, force); err != nil {
 				return wrap(err)
 			}
 			return tidy(ctx, fdb.sql)
@@ -199,7 +199,9 @@ func garbageCollectNamesAndVersions(ctx context.Context, fdb *folderDB) error {
 	return nil
 }
 
-func garbageCollectOldDeletedLocked(ctx context.Context, fdb *folderDB) error {
+// garbageCollectOldDeletedLocked removes old deleted file records (tombstones).
+// If force is true, the time limit is ignored and all eligible tombstones are deleted.
+func garbageCollectOldDeletedLocked(ctx context.Context, fdb *folderDB, force bool) error {
 	l := slog.With("folder", fdb.folderID, "fdb", fdb.baseName)
 	l.DebugContext(ctx, "Starting tombstone GC for folder")
 	if fdb.deleteRetention <= 0 {
@@ -218,9 +220,11 @@ func garbageCollectOldDeletedLocked(ctx context.Context, fdb *folderDB) error {
 	var totalAffected int64
 	var chunkNum int
 	for {
-		if d := time.Since(t0); d > gcMaxRuntime {
-			l.InfoContext(ctx, "Tombstone GC was interrupted due to exceeding time limit", "affected", totalAffected, "runtime", d)
-			break
+		if !force {
+			if d := time.Since(t0); d > gcMaxRuntime {
+				l.InfoContext(ctx, "Tombstone GC was interrupted due to exceeding time limit", "affected", totalAffected, "runtime", d)
+				break
+			}
 		}
 
 		chunkNum++
@@ -259,7 +263,9 @@ func garbageCollectOldDeletedLocked(ctx context.Context, fdb *folderDB) error {
 	return nil
 }
 
-func garbageCollectBlocklistsAndBlocksLocked(ctx context.Context, fdb *folderDB) error {
+// garbageCollectBlocklistsAndBlocksLocked removes orphaned blocklists and blocks.
+// If force is true, the time limit is ignored and all orphaned entries are deleted.
+func garbageCollectBlocklistsAndBlocksLocked(ctx context.Context, fdb *folderDB, force bool) error {
 	// Remove all blocklists not referred to by any files and, by extension,
 	// any blocks not referred to by a blocklist. This is an expensive
 	// operation when run normally, especially if there are a lot of blocks
@@ -300,14 +306,16 @@ func garbageCollectBlocklistsAndBlocksLocked(ctx context.Context, fdb *folderDB)
 		chunks := max(gcMinChunks, rows/gcChunkSize)
 		l := slog.With("folder", fdb.folderID, "fdb", fdb.baseName, "table", table, "rows", rows, "chunks", chunks)
 
-		// Process rows in chunks up to a given time limit. We always use at
-		// least gcMinChunks chunks, then increase the number as the number of rows
-		// exceeds gcMinChunks*gcChunkSize.
+		// Process rows in chunks up to a given time limit (unless force is set).
+		// We always use at least gcMinChunks chunks, then increase the number
+		// as the number of rows exceeds gcMinChunks*gcChunkSize.
 		t0 := time.Now()
 		for i, br := range randomBlobRanges(int(chunks)) {
-			if d := time.Since(t0); d > gcMaxRuntime {
-				l.InfoContext(ctx, "GC was interrupted due to exceeding time limit", "processed", i, "runtime", time.Since(t0))
-				break
+			if !force {
+				if d := time.Since(t0); d > gcMaxRuntime {
+					l.InfoContext(ctx, "GC was interrupted due to exceeding time limit", "processed", i, "runtime", time.Since(t0))
+					break
+				}
 			}
 
 			// The limit column must be an indexed column with a mostly random distribution of blobs.
